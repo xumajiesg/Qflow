@@ -20,7 +20,7 @@ import pyautogui
 from pynput import keyboard
 from pynput.keyboard import Controller as KeyboardController
 import copy
-from datetime import datetime
+from datetime import datetime, timedelta
 from collections import namedtuple
 
 # 尝试导入 pyperclip 用于剪贴板粘贴模式
@@ -121,7 +121,6 @@ COLORS.update({
     'breakpoint': '#e53935', 'log_bg': '#1e1e1e', 'log_fg': '#d4d4d4', 'win_node': '#009688'
 })
 
-# [修复] 提升全局字体清晰度，增加字号，统一使用微软雅黑
 FONTS = {
     'node_title': ('Microsoft YaHei', int(10 * SCALE_FACTOR), 'bold'), 
     'node_text': ('Microsoft YaHei', int(9 * SCALE_FACTOR)),
@@ -159,7 +158,7 @@ NODE_CONFIG = {
     'wait':     {'title': '⏳ 延时', 'outputs': ['out'], 'color': '#4527a0', 'desc': '等待指定时间'},
     'mouse':    {'title': '👆 鼠标', 'outputs': ['out'], 'color': '#1565c0', 'desc': '点击、移动、拖拽或滚动'},
     'keyboard': {'title': '⌨️ 键盘', 'outputs': ['out'], 'color': '#1565c0', 'desc': '输入文本或按下组合键'},
-    'clipboard':{'title': '📋 剪贴板', 'outputs': ['out'], 'color': '#00838f', 'desc': '读取或写入系统剪贴板内容'}, # [修复] 新增剪贴板节点
+    'clipboard':{'title': '📋 剪贴板', 'outputs': ['out'], 'color': '#00838f', 'desc': '读取或写入系统剪贴板内容'},
     'notify':   {'title': '🔔 提示', 'outputs': ['out'], 'color': '#fdd835', 'desc': '显示屏幕通知气泡'},
     'cmd':      {'title': '💻 命令', 'outputs': ['out'], 'color': '#1565c0', 'desc': '执行系统CMD命令'},
     'web':      {'title': '🔗 网页', 'outputs': ['out'], 'color': '#0277bd', 'desc': '打开指定的URL'},
@@ -211,7 +210,6 @@ class KeyboardEngine:
     
     @staticmethod
     def safe_write(text, mode='direct'):
-        """mode: direct(按键模拟), paste(剪贴板粘贴)"""
         if mode == 'paste' and HAS_PYPERCLIP:
             try:
                 old_clip = pyperclip.paste()
@@ -230,11 +228,10 @@ class KeyboardEngine:
                 try:
                     KeyboardEngine._controller.type(char)
                 except:
-                    pyautogui.write(char) # 回退
+                    pyautogui.write(char) 
                 time.sleep(0.005)
 
 class VisualTips:
-    """视觉提示小窗"""
     @staticmethod
     def show_toast(message, duration=2000, use_sound=False):
         try:
@@ -771,7 +768,6 @@ class AutomationCore:
             if data.get('var_name'): self.runtime_memory[data['var_name']] = data.get('var_value', '')
             return 'out'
 
-        # [修复] 剪贴板读取写入支持
         if ntype == 'clipboard':
             mode = data.get('clip_mode', 'read')
             if mode == 'read':
@@ -1727,7 +1723,6 @@ class PropertyPanel(tk.Frame):
         tk.Frame(f, height=1, bg=COLORS['bg_header']).pack(fill='x', pady=(2, 5))
         return f
     
-    # [修复] 传递 refresh_ui=False 禁止强制刷新UI，解决输入打断问题；并修正 history 归属
     def _input(self, parent, label, key, val, vfunc=None):
         target_node = self.current_node 
         f = tk.Frame(parent, bg=parent.cget('bg')); f.pack(fill='x', pady=2)
@@ -1741,7 +1736,6 @@ class PropertyPanel(tk.Frame):
         
         e = tk.Entry(f, bg=COLORS['input_bg'], fg='white', bd=0, insertbackground='white', font=('Microsoft YaHei', int(10 * SCALE_FACTOR)), textvariable=var)
         e.pack(fill='x', pady=2, ipady=3, expand=True)
-        # [修复] 失去焦点时保存历史记录（指向真正的 Editor）
         e.bind("<FocusOut>", lambda ev: self.app.editor.history.save_state())
         e.bind("<Return>", lambda ev: self.app.editor.focus_set())
         
@@ -1773,7 +1767,6 @@ class PropertyPanel(tk.Frame):
         
         e = tk.Entry(parent, bg=COLORS['input_bg'], fg='white', bd=0, width=6, textvariable=var)
         e.pack(side='left', padx=2)
-        # [修复] 失去焦点时保存历史记录（指向真正的 Editor）
         e.bind("<FocusOut>", lambda ev: self.app.editor.history.save_state())
         e.bind("<Return>", lambda ev: self.app.editor.focus_set())
         
@@ -1980,11 +1973,17 @@ class App(tk.Tk):
         self.hotkey_listener = None
         self._setup_ui(); self.refresh_hotkeys()
         
+        # --- 新增：定时器相关变量 ---
+        self.scheduled_time = None
+        self.scheduler_thread = None
+        self.scheduler_running = False
+        self.schedule_daily = False 
+        # ---------------------------
+        
         self.bind("<Control-s>", lambda e: self.save())
         
         self.update_title()
         self.after(100, self._poll_log)
-        # [新增] 启动 500 毫秒后显示欢迎引导
         self.after(500, self.show_welcome_guide)
 
     def update_title(self):
@@ -2005,6 +2004,11 @@ class App(tk.Tk):
         self.btn_run = tk.Button(title_bar, text="▶ 启动", command=lambda: self.toggle_run(None), bg=COLORS['success'], fg='#1f1f1f', font=('Microsoft YaHei', 11, 'bold'), padx=15, bd=0, cursor='hand2'); self.btn_run.pack(side='right')
         self.btn_pause = tk.Button(title_bar, text="⏸ 暂停", command=self.toggle_pause, bg=COLORS['warning'], fg='#1f1f1f', bd=0, padx=10, state='disabled', cursor='hand2', font=('Microsoft YaHei', 9)); self.btn_pause.pack(side='right', padx=10)
         
+        # --- 新增：定时按钮 ---
+        self.btn_schedule = tk.Button(title_bar, text="⏲ 定时", command=self.open_schedule_dialog, bg=COLORS['control'], fg='white', bd=0, padx=10, cursor='hand2', font=('Microsoft YaHei', 9))
+        self.btn_schedule.pack(side='right', padx=10)
+        # ---------------------
+        
         self.main_paned = tk.PanedWindow(self, orient='vertical', bg=COLORS['bg_app'], sashwidth=4, bd=0)
         self.main_paned.pack(fill='both', expand=True, padx=10, pady=(0, 5))
         
@@ -2019,7 +2023,7 @@ class App(tk.Tk):
         self.property_panel = PropertyPanel(h_paned, self); h_paned.add(self.property_panel, minsize=280, width=180)
         
         self.log_panel = LogPanel(self.main_paned)
-        self.main_paned.add(self.log_panel, minsize=80, height=130) # 状态栏默认高度
+        self.main_paned.add(self.log_panel, minsize=80, height=130) 
         
         self.editor.add_node('start', 100, 100, save_history=False)
 
@@ -2189,10 +2193,16 @@ class App(tk.Tk):
     def open_settings(self): SettingsDialog(self, self)
     def restart_ui(self): data = self.editor.get_data(); self._setup_ui(); self.editor.load_data(data)
 
-    def toggle_run(self, start_id): 
+    def toggle_run(self, start_id, auto_triggered=False): 
+        # --- 修改：如果是手动点击启动，且当前有定时任务，才取消定时 ---
+        if self.scheduler_running and not auto_triggered: 
+            self.cancel_schedule()
+        # -------------------------------------------------------------
+        
         self.editor.focus_set()
         if self.core.running: self.core.stop()
         else: self.btn_run.config(text="⏹ 停止", bg=COLORS['danger']); self.btn_pause.config(state='normal', text="⏸ 暂停", bg=COLORS['warning']); self.core.load_project(self.editor.get_data()); self.core.start(start_id)
+
     def toggle_pause(self): (self.core.resume() if self.core.paused else self.core.pause())
     def update_debug_btn_state(self, paused): self.btn_pause.config(text="▶ 继续" if paused else "⏸ 暂停", bg=COLORS['success'] if paused else COLORS['warning'])
     def reset_ui_state(self): self.core.running=False; self.btn_run.config(text="▶ 启动", bg=COLORS['success']); self.btn_pause.config(text="⏸ 暂停", bg=COLORS['warning'], state='disabled'); [self.highlight_node_safe(n, None) for n in self.editor.nodes]
@@ -2210,7 +2220,6 @@ class App(tk.Tk):
         self.after(0, _task)
     def select_node_safe(self, nid): self.after(0, lambda: self.editor.select_node(nid))
     
-    # [修复] 增加原位保存和另存为逻辑
     def save(self):
         if self.current_file_path:
             try:
@@ -2252,5 +2261,91 @@ class App(tk.Tk):
         self.log("3. 【配置属性】单击选中画布上的节点，在右侧面板设置具体参数。", "info")
         self.log("4. 【右键菜单】右键点击 [节点] 可复制或删除；右键点击 [端口] 可清除连线。", "warning")
         self.log("5. 【运行控制】点击上方 [▶ 启动] 或使用快捷键 F9 (启动) / F10 (停止)。", "success")
+
+    # ================== 新增：支持每日循环的定时功能逻辑 ==================
+    def open_schedule_dialog(self):
+        if self.scheduler_running:
+            self.cancel_schedule()
+            return
+
+        dialog = tk.Toplevel(self)
+        dialog.title("定时启动设置")
+        dialog.geometry("300x180")  # 高度稍微加高一点放复选框
+        dialog.config(bg=COLORS['bg_panel'])
+        dialog.transient(self)
+        dialog.grab_set()
+
+        dialog.geometry("+%d+%d" % (self.winfo_rootx() + self.winfo_width()//2 - 150, self.winfo_rooty() + self.winfo_height()//2 - 90))
+
+        tk.Label(dialog, text="请输入启动时间 (24小时制 HH:MM:SS)\n例如: 14:30:00 或 00:00:00", bg=COLORS['bg_panel'], fg=COLORS['fg_text']).pack(pady=(15, 5))
+        
+        time_var = tk.StringVar()
+        e = tk.Entry(dialog, textvariable=time_var, bg=COLORS['input_bg'], fg='white', insertbackground='white', font=('Consolas', 12), justify='center')
+        e.pack(pady=5, ipadx=10, ipady=3)
+        e.insert(0, (datetime.now() + timedelta(minutes=1)).strftime("%H:%M:%S"))
+
+        # 新增：每天重复执行的复选框
+        daily_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(dialog, text="每天重复执行", variable=daily_var, bg=COLORS['bg_panel'], fg='white', selectcolor=COLORS['bg_app'], activebackground=COLORS['bg_panel']).pack(pady=2)
+
+        def on_confirm():
+            target_time_str = time_var.get().strip()
+            if len(target_time_str.split(':')) == 2: target_time_str += ":00"
+            
+            try:
+                datetime.strptime(target_time_str, "%H:%M:%S")
+                self.start_schedule(target_time_str, daily_var.get())
+                dialog.destroy()
+            except ValueError:
+                messagebox.showerror("格式错误", "请输入正确的时间格式 (HH:MM:SS)", parent=dialog)
+
+        tk.Button(dialog, text="确定", command=on_confirm, bg=COLORS['accent'], fg='white', bd=0, padx=20, pady=2, cursor='hand2').pack(pady=5)
+
+    def start_schedule(self, time_str, is_daily):
+        self.scheduled_time = time_str
+        self.schedule_daily = is_daily
+        self.scheduler_running = True
+        
+        tag = "每天 " if is_daily else ""
+        self.btn_schedule.config(text=f"⏲ 取消定时 ({tag}{time_str})", bg=COLORS['warning'], fg='#1f1f1f')
+        self.log(f"⏲ 已设置定时启动，将在 {tag}{time_str} 准时执行", "success")
+        
+        self.scheduler_thread = threading.Thread(target=self._scheduler_loop, daemon=True)
+        self.scheduler_thread.start()
+
+    def cancel_schedule(self):
+        self.scheduler_running = False
+        self.scheduled_time = None
+        self.schedule_daily = False
+        self.btn_schedule.config(text="⏲ 定时", bg=COLORS['control'], fg='white')
+        self.log("⏲ 定时启动已取消", "warning")
+
+    def _scheduler_loop(self):
+        last_run_date = None  # 记录上次执行的日期，防止同一秒内触发多次，也防止同一天重复触发
+        
+        while self.scheduler_running:
+            now = datetime.now()
+            current_time = now.strftime("%H:%M:%S")
+            current_date = now.date()
+
+            # 时间匹配，且今天还没执行过
+            if current_time == self.scheduled_time and current_date != last_run_date:
+                self.log(f"⏰ 到达定时时间 {self.scheduled_time}，正在自动启动流程...", "success")
+                last_run_date = current_date
+                
+                # 触发启动 (传入 auto_triggered=True，防止把循环定时器关掉)
+                self.after(0, lambda: self.toggle_run(None, auto_triggered=True))
+                
+                if not self.schedule_daily:
+                    # 如果不是每天重复，执行一次就结束线程
+                    self.scheduler_running = False
+                    self.after(0, lambda: self.btn_schedule.config(text="⏲ 定时", bg=COLORS['control'], fg='white'))
+                    break
+                else:
+                    self.log("📅 每日重复已开启，明天同一时间将再次执行", "info")
+                    time.sleep(1) # 强制休眠1秒，完美避开同一秒内的重复判定
+
+            time.sleep(0.5)
+    # ====================================================================
 
 if __name__ == "__main__": App().mainloop()
