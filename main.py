@@ -550,11 +550,62 @@ class LogPanel(tk.Frame):
     def clear(self): 
         self.text_area.config(state='normal'); self.text_area.delete(1.0, 'end'); self.text_area.config(state='disabled')
 
+class WatchPanel(tk.Frame):
+    """运行时变量监视面板"""
+    def __init__(self, parent, **kwargs):
+        super().__init__(parent, bg=COLORS['bg_panel'], **kwargs)
+        self.core_ref = None  # 由 App 注入
+
+        # 标题栏
+        toolbar = tk.Frame(self, bg=COLORS['bg_header'], height=28)
+        toolbar.pack_propagate(False)
+        toolbar.pack(fill='x')
+        tk.Label(toolbar, text="🔍 变量监视", bg=COLORS['bg_header'],
+                 fg='white', font=FONTS['node_title']).pack(side='left', padx=10)
+        tk.Button(toolbar, text="🔄", command=self.refresh,
+                  bg=COLORS['bg_header'], fg=COLORS['accent'], bd=0,
+                  font=FONTS['small']).pack(side='right', padx=5)
+
+        # 变量表格
+        cols = ('变量名', '值', '类型')
+        frame = tk.Frame(self, bg=COLORS['bg_panel'])
+        frame.pack(fill='both', expand=True)
+        self.tree = ttk.Treeview(frame, columns=cols, show='headings', height=6)
+        self.tree.heading('变量名', text='变量名')
+        self.tree.heading('值', text='值')
+        self.tree.heading('类型', text='类型')
+        self.tree.column('变量名', width=120, minwidth=80)
+        self.tree.column('值', width=200, minwidth=100)
+        self.tree.column('类型', width=60, minwidth=50)
+        vsb = ttk.Scrollbar(frame, orient='vertical', command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vsb.set)
+        vsb.pack(side='right', fill='y')
+        self.tree.pack(side='left', fill='both', expand=True)
+
+    def refresh(self):
+        """刷新变量列表"""
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        if not self.core_ref:
+            return
+        mem = self.core_ref.runtime_memory
+        if not mem:
+            self.tree.insert('', 'end', values=('(暂无变量)', '', ''))
+            return
+        for k, v in sorted(mem.items()):
+            type_name = type(v).__name__
+            display_v = str(v)
+            if len(display_v) > 100:
+                display_v = display_v[:97] + '...'
+            self.tree.insert('', 'end', values=(k, display_v, type_name))
+
+
 class AutomationCore:
     def __init__(self, log_callback, app_instance):
         self.running = False; self.paused = False; self.stop_event = threading.Event(); self.pause_event = threading.Event()
         self.log = log_callback; self.app = app_instance; self.project = None; self.runtime_memory = {}; self.io_lock = threading.Lock()
         self.active_threads = 0; self.thread_lock = threading.Lock(); self.scaling_ratio = 1.0; self.breakpoints = set()
+        self._step_mode = False
         self.max_threads = 50 
         self.context = {'window_rect': None, 'window_handle': 0, 'window_offset': (0, 0)}
         self.performance_stats = {'nodes_executed': 0, 'errors': 0, 'start_time': None}
@@ -608,8 +659,29 @@ class AutomationCore:
     
     def _check_pause(self, node_id=None):
         if node_id and node_id in self.breakpoints:
-            if not self.paused: self.log(f"🔴 命中断点: {node_id}", "paused"); self.pause(); self.app.after(0, self.app.deiconify)
+            if not self.paused:
+                node_title = self.project['nodes'].get(node_id, {}).get('data', {}).get('_user_title', node_id)
+                self.log(f"🔴 命中断点: [{node_title}]", "paused")
+                self.pause()
+                self.app.after(0, self.app.deiconify)
+                self.app.after(100, self.app.refresh_watch_panel)
         if not self.pause_event.is_set(): self.pause_event.wait()
+
+    def step(self):
+        """单步执行：执行下一个节点后自动重新暂停"""
+        if not self.paused: return
+        self._step_mode = True
+        self.paused = False
+        self.pause_event.set()
+
+    def toggle_breakpoint(self, node_id):
+        """切换断点，返回切换后是否有断点"""
+        if node_id in self.breakpoints:
+            self.breakpoints.discard(node_id)
+            return False
+        else:
+            self.breakpoints.add(node_id)
+            return True
     
     def _get_next_links(self, node_id, port_name='out'): return [l['target'] for l in self.project['links'] if l['source'] == node_id and l.get('source_port') == port_name]
     
@@ -646,6 +718,11 @@ class AutomationCore:
             if not (node := self.project['nodes'].get(node_id)): return
             self._check_pause(node_id)
             if self.stop_event.is_set(): return
+            # 单步模式：本节点执行完后立即重新暂停
+            if self._step_mode and not self.stop_event.is_set():
+                self._step_mode = False
+                self.pause()
+                self.app.after(100, self.app.refresh_watch_panel)
             self.app.highlight_node_safe(node_id, 'running'); self.app.select_node_safe(node_id)
             try: 
                 out_port = self._execute_node(node)
@@ -982,6 +1059,25 @@ class AutomationCore:
                 if not VisionEngine._advanced_match(img.get('image'), hay, safe_float(data.get('confidence',0.9)), self.stop_event, True, True, self.scaling_ratio, 'hybrid')[0]: return 'no'
             return 'yes'
         return 'out'
+
+    def draw_breakpoint_indicator(self, has_breakpoint):
+        """在节点左上角绘制/清除断点红点标记"""
+        tag = f"bp_{self.id}"
+        self.canvas.delete(tag)
+        if has_breakpoint:
+            r = int(7 * SCALE_FACTOR)
+            # 节点左上角偏移
+            cx = int(self.x * self.canvas._scale + self.canvas._offset_x) + r + 4 if hasattr(self.canvas, '_scale') else self.x + r + 4
+            cy = int(self.y * self.canvas._scale + self.canvas._offset_y) + r + 4 if hasattr(self.canvas, '_scale') else self.y + r + 4
+            # 直接用节点坐标（画布坐标系）
+            nx = self.x + r + 2
+            ny = self.y + r + 2
+            self.canvas.create_oval(
+                nx - r, ny - r, nx + r, ny + r,
+                fill=COLORS['breakpoint'], outline='#ff8a80',
+                width=2, tags=(tag, f"node_{self.id}")
+            )
+
 
 # --- 5. 历史记录与节点 ---
 class HistoryManager:
@@ -2003,6 +2099,7 @@ class App(tk.Tk):
             
         self.btn_run = tk.Button(title_bar, text="▶ 启动", command=lambda: self.toggle_run(None), bg=COLORS['success'], fg='#1f1f1f', font=('Microsoft YaHei', 11, 'bold'), padx=15, bd=0, cursor='hand2'); self.btn_run.pack(side='right')
         self.btn_pause = tk.Button(title_bar, text="⏸ 暂停", command=self.toggle_pause, bg=COLORS['warning'], fg='#1f1f1f', bd=0, padx=10, state='disabled', cursor='hand2', font=('Microsoft YaHei', 9)); self.btn_pause.pack(side='right', padx=10)
+        self.btn_step = tk.Button(title_bar, text="⏭ 单步", command=self._on_step, bg=COLORS['btn_bg'], fg='white', bd=0, padx=8, state='disabled', cursor='hand2', font=('Microsoft YaHei', 9)); self.btn_step.pack(side='right', padx=2)
         
         # --- 新增：定时按钮 ---
         self.btn_schedule = tk.Button(title_bar, text="⏲ 定时", command=self.open_schedule_dialog, bg=COLORS['control'], fg='white', bd=0, padx=10, cursor='hand2', font=('Microsoft YaHei', 9))
@@ -2023,7 +2120,10 @@ class App(tk.Tk):
         self.property_panel = PropertyPanel(h_paned, self); h_paned.add(self.property_panel, minsize=280, width=180)
         
         self.log_panel = LogPanel(self.main_paned)
-        self.main_paned.add(self.log_panel, minsize=80, height=130) 
+        self.main_paned.add(self.log_panel, minsize=80, height=130)
+        self.watch_panel = WatchPanel(self.main_paned)
+        self.main_paned.add(self.watch_panel, minsize=60, height=120)
+        self.watch_panel.core_ref = self.core 
         
         self.editor.add_node('start', 100, 100, save_history=False)
 
@@ -2204,7 +2304,21 @@ class App(tk.Tk):
         else: self.btn_run.config(text="⏹ 停止", bg=COLORS['danger']); self.btn_pause.config(state='normal', text="⏸ 暂停", bg=COLORS['warning']); self.core.load_project(self.editor.get_data()); self.core.start(start_id)
 
     def toggle_pause(self): (self.core.resume() if self.core.paused else self.core.pause())
-    def update_debug_btn_state(self, paused): self.btn_pause.config(text="▶ 继续" if paused else "⏸ 暂停", bg=COLORS['success'] if paused else COLORS['warning'])
+    def update_debug_btn_state(self, paused):
+        self.btn_pause.config(text="▶ 继续" if paused else "⏸ 暂停", bg=COLORS['success'] if paused else COLORS['warning'])
+        state = 'normal' if paused else 'disabled'
+        if hasattr(self, 'btn_step') and self.btn_step.winfo_exists():
+            self.btn_step.config(state=state)
+        if paused:
+            self.refresh_watch_panel()
+
+    def refresh_watch_panel(self):
+        if hasattr(self, 'watch_panel') and self.watch_panel.winfo_exists():
+            self.watch_panel.refresh()
+
+    def _on_step(self):
+        if self.core.paused:
+            self.core.step()
     def reset_ui_state(self): self.core.running=False; self.btn_run.config(text="▶ 启动", bg=COLORS['success']); self.btn_pause.config(text="⏸ 暂停", bg=COLORS['warning'], state='disabled'); [self.highlight_node_safe(n, None) for n in self.editor.nodes]
     def log(self,msg, level='info'): self.log_q.put((msg, level))
     def _poll_log(self):
