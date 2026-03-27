@@ -52,6 +52,8 @@ except ImportError:
 try:
     import ctypes
     from ctypes import *
+    import tempfile
+    
     class OCR_PARAM(Structure):
         _fields_ = [
             ("padding", c_int), ("maxSideLen", c_int), ("boxScoreThresh", c_float),
@@ -59,20 +61,30 @@ try:
         ]
     
     class RapidOcr:
+        """RapidOCR 嵌入式版本封装"""
         def __init__(self, dll_path):
             self.dll = ctypes.CDLL(dll_path)
             self.handle = None
             self._setup_functions()
         
         def _setup_functions(self):
+            # 嵌入式初始化
             self.dll.OcrInitEmbedded.argtypes = [c_int]
             self.dll.OcrInitEmbedded.restype = c_void_p
+            # 从文件识别
+            self.dll.OcrDetect.argtypes = [c_void_p, c_char_p, c_char_p, POINTER(OCR_PARAM)]
+            self.dll.OcrDetect.restype = c_bool
+            # 从内存识别
             self.dll.OcrDetectMem.argtypes = [c_void_p, POINTER(c_ubyte), c_int, POINTER(OCR_PARAM)]
-            self.dll.OcrDetectMem.restype = c_int
+            self.dll.OcrDetectMem.restype = c_bool
+            # 获取结果
             self.dll.OcrGetLen.argtypes = [c_void_p]
             self.dll.OcrGetLen.restype = c_int
+            self.dll.OcrGetResult.argtypes = [c_void_p, c_char_p, c_int]
+            self.dll.OcrGetResult.restype = c_int
             self.dll.OcrGetResultMem.argtypes = [c_void_p, POINTER(c_char_p)]
             self.dll.OcrGetResultMem.restype = c_int
+            # 销毁
             self.dll.OcrDestroy.argtypes = [c_void_p]
             self.dll.OcrDestroy.restype = None
         
@@ -80,43 +92,72 @@ try:
             self.handle = self.dll.OcrInitEmbedded(num_threads)
             return self.handle is not None
         
-        def detect(self, img_data, img_size):
+        def detect_from_file(self, image_path):
+            """从文件识别"""
             if not self.handle: return None
-            param = OCR_PARAM(padding=50, maxSideLen=1024, boxScoreThresh=0.6, boxThresh=0.3, unClipRatio=1.0, doAngle=1, mostAngle=1)
+            img_dir = os.path.dirname(image_path)
+            img_name = os.path.basename(image_path)
+            param = OCR_PARAM(padding=50, maxSideLen=1024, boxScoreThresh=0.6, boxThresh=0.3, unClipRatio=1.5, doAngle=1, mostAngle=1)
+            success = self.dll.OcrDetect(self.handle, img_dir.encode('utf-8') if img_dir else b"", img_name.encode('utf-8'), byref(param))
+            if not success: return None
+            length = self.dll.OcrGetLen(self.handle)
+            if length <= 0: return None
+            buffer = create_string_buffer(length + 1)
+            self.dll.OcrGetResult(self.handle, buffer, length + 1)
+            return buffer.value.decode('utf-8') if buffer.value else None
+        
+        def detect_from_memory(self, img_data, img_size):
+            """从内存识别"""
+            if not self.handle: return None
+            param = OCR_PARAM(padding=50, maxSideLen=1024, boxScoreThresh=0.6, boxThresh=0.3, unClipRatio=1.5, doAngle=1, mostAngle=1)
             img_array = (c_ubyte * img_size)(*img_data)
-            result = self.dll.OcrDetectMem(self.handle, img_array, img_size, byref(param))
-            if result > 0:
-                text_len = self.dll.OcrGetLen(self.handle)
-                if text_len > 0:
-                    result_ptr = c_char_p()
-                    self.dll.OcrGetResultMem(self.handle, byref(result_ptr))
-                    return result_ptr.value.decode('utf-8') if result_ptr.value else None
-            return None
+            success = self.dll.OcrDetectMem(self.handle, img_array, img_size, byref(param))
+            if not success: return None
+            length = self.dll.OcrGetLen(self.handle)
+            if length <= 0: return None
+            result_ptr = c_char_p()
+            self.dll.OcrGetResultMem(self.handle, byref(result_ptr))
+            return result_ptr.value.decode('utf-8') if result_ptr.value else None
+        
+        def detect(self, pil_image):
+            """识别 PIL Image 对象"""
+            import io
+            buffer = io.BytesIO()
+            pil_image.convert('RGB').save(buffer, format='JPEG', quality=85)
+            img_data = buffer.getvalue()
+            return self.detect_from_memory(img_data, len(img_data))
         
         def destroy(self):
             if self.handle: self.dll.OcrDestroy(self.handle); self.handle = None
     
     HAS_OCR = True
     OCR_ENGINE = None
-except Exception:
+except Exception as e:
     HAS_OCR = False
     OCR_ENGINE = None
-    print("⚠️ 提示: OCR功能需要 RapidOcrOnnx64.dll")
+    print(f"⚠️ OCR模块加载失败: {e}")
 
 def get_ocr_engine():
+    """获取或初始化 OCR 引擎"""
     global OCR_ENGINE
     if not HAS_OCR: return None
     if OCR_ENGINE is None:
         base_dir = os.path.dirname(os.path.abspath(__file__)) if '__file__' in dir() else '.'
-        is_64bit = (ctypes.sizeof(ctypes.c_void_p) == 8)
-        dll_name = 'RapidOcrOnnx64.dll' if is_64bit else 'RapidOcrOnnx32.dll'
-        dll_path = os.path.join(base_dir, dll_name)
-        if os.path.exists(dll_path):
-            try:
-                OCR_ENGINE = RapidOcr(dll_path)
-                if not OCR_ENGINE.init_embedded(4):
+        # 尝试多个可能的 DLL 名称
+        dll_names = ['RapidOcrOnnx.dll', 'RapidOcrOnnx64.dll']
+        for dll_name in dll_names:
+            dll_path = os.path.join(base_dir, dll_name)
+            if os.path.exists(dll_path):
+                try:
+                    OCR_ENGINE = RapidOcr(dll_path)
+                    if OCR_ENGINE.init_embedded(4):
+                        print(f"✅ OCR引擎初始化成功: {dll_name}")
+                        return OCR_ENGINE
+                    else:
+                        OCR_ENGINE = None
+                except Exception as e:
+                    print(f"⚠️ OCR初始化失败 ({dll_name}): {e}")
                     OCR_ENGINE = None
-            except: OCR_ENGINE = None
     return OCR_ENGINE
 
 # --- 2. 系统与配置管理 ---
@@ -956,7 +997,6 @@ class AutomationCore:
                 return 'not_found'
             
             try:
-                import io
                 ocr = get_ocr_engine()
                 if not ocr:
                     self.log("❌ OCR 引擎初始化失败", "error")
@@ -969,13 +1009,8 @@ class AutomationCore:
                     self.log("❌ OCR 截图失败", "error")
                     return 'not_found'
                 
-                # 转为 JPEG 字节流
-                buffer = io.BytesIO()
-                img.convert('RGB').save(buffer, format='JPEG', quality=85)
-                img_data = buffer.getvalue()
-                
-                # OCR 识别
-                text = ocr.detect(img_data, len(img_data))
+                # OCR 识别 (直接传入 PIL Image)
+                text = ocr.detect(img)
                 text = text if text else ''
                 
                 # 保存到变量
