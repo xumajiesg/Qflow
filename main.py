@@ -2322,7 +2322,7 @@ class App(tk.Tk):
             ("应用控制", ['open_app', 'bind_win', 'cmd', 'web']),
             ("逻辑组件", ['start', 'end', 'loop', 'sequence', 'set_var', 'var_switch', 'clipboard', 'notify']),
             ("动作执行", ['mouse', 'keyboard', 'wait']),
-            ("视觉/感知", ['image', 'if_img', 'if_static', 'if_sound'])
+            ("视觉/感知", ['image', 'if_img', 'if_static', 'if_sound', 'ocr'])
         ]
         
         for title, items in tool_groups:
