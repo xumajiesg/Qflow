@@ -48,6 +48,77 @@ try:
 except ImportError:
     HAS_AUDIO = False
 
+# --- OCR 文字识别支持 ---
+try:
+    import ctypes
+    from ctypes import *
+    class OCR_PARAM(Structure):
+        _fields_ = [
+            ("padding", c_int), ("maxSideLen", c_int), ("boxScoreThresh", c_float),
+            ("boxThresh", c_float), ("unClipRatio", c_float), ("doAngle", c_int), ("mostAngle", c_int),
+        ]
+    
+    class RapidOcr:
+        def __init__(self, dll_path):
+            self.dll = ctypes.CDLL(dll_path)
+            self.handle = None
+            self._setup_functions()
+        
+        def _setup_functions(self):
+            self.dll.OcrInitEmbedded.argtypes = [c_int]
+            self.dll.OcrInitEmbedded.restype = c_void_p
+            self.dll.OcrDetectMem.argtypes = [c_void_p, POINTER(c_ubyte), c_int, POINTER(OCR_PARAM)]
+            self.dll.OcrDetectMem.restype = c_int
+            self.dll.OcrGetLen.argtypes = [c_void_p]
+            self.dll.OcrGetLen.restype = c_int
+            self.dll.OcrGetResultMem.argtypes = [c_void_p, POINTER(c_char_p)]
+            self.dll.OcrGetResultMem.restype = c_int
+            self.dll.OcrDestroy.argtypes = [c_void_p]
+            self.dll.OcrDestroy.restype = None
+        
+        def init_embedded(self, num_threads=4):
+            self.handle = self.dll.OcrInitEmbedded(num_threads)
+            return self.handle is not None
+        
+        def detect(self, img_data, img_size):
+            if not self.handle: return None
+            param = OCR_PARAM(padding=50, maxSideLen=1024, boxScoreThresh=0.6, boxThresh=0.3, unClipRatio=1.0, doAngle=1, mostAngle=1)
+            img_array = (c_ubyte * img_size)(*img_data)
+            result = self.dll.OcrDetectMem(self.handle, img_array, img_size, byref(param))
+            if result > 0:
+                text_len = self.dll.OcrGetLen(self.handle)
+                if text_len > 0:
+                    result_ptr = c_char_p()
+                    self.dll.OcrGetResultMem(self.handle, byref(result_ptr))
+                    return result_ptr.value.decode('utf-8') if result_ptr.value else None
+            return None
+        
+        def destroy(self):
+            if self.handle: self.dll.OcrDestroy(self.handle); self.handle = None
+    
+    HAS_OCR = True
+    OCR_ENGINE = None
+except Exception:
+    HAS_OCR = False
+    OCR_ENGINE = None
+    print("⚠️ 提示: OCR功能需要 RapidOcrOnnx64.dll")
+
+def get_ocr_engine():
+    global OCR_ENGINE
+    if not HAS_OCR: return None
+    if OCR_ENGINE is None:
+        base_dir = os.path.dirname(os.path.abspath(__file__)) if '__file__' in dir() else '.'
+        is_64bit = (ctypes.sizeof(ctypes.c_void_p) == 8)
+        dll_name = 'RapidOcrOnnx64.dll' if is_64bit else 'RapidOcrOnnx32.dll'
+        dll_path = os.path.join(base_dir, dll_name)
+        if os.path.exists(dll_path):
+            try:
+                OCR_ENGINE = RapidOcr(dll_path)
+                if not OCR_ENGINE.init_embedded(4):
+                    OCR_ENGINE = None
+            except: OCR_ENGINE = None
+    return OCR_ENGINE
+
 # --- 2. 系统与配置管理 ---
 pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0.05  # 增加全局操作间隔，提升稳定性
@@ -169,7 +240,8 @@ NODE_CONFIG = {
     'set_var':  {'title': '[x] 变量', 'outputs': ['out'], 'color': '#00838f', 'desc': '设置或修改内存变量'},
     'var_switch':{'title': '⎇ 分流', 'outputs': ['else'], 'color': '#00838f', 'desc': '根据变量值选择不同路径'},
     'sequence': {'title': '🔀 序列', 'outputs': ['else'], 'color': '#7b1fa2', 'desc': '按顺序尝试多条路径'},
-    'reroute':  {'title': '●', 'outputs': ['out'], 'color': '#777777', 'desc': '线路中继点'}
+    'reroute':  {'title': '●', 'outputs': ['out'], 'color': '#777777', 'desc': '线路中继点'},
+    'ocr':     {'title': '📝 OCR识别', 'outputs': ['found', 'not_found'], 'color': '#795548', 'desc': '识别屏幕区域的文字内容'},
 }
 
 PORT_TRANSLATION = {'out': '继续', 'yes': '是', 'no': '否', 'found': '找到', 'timeout': '超时', 'loop': '循环', 'exit': '退出', 'else': '否则', 'success': '成功', 'fail': '失败'}
@@ -858,6 +930,72 @@ class AutomationCore:
                 else:
                     self.log("⚠️ 未安装 pyperclip，无法写入剪贴板", "warning")
             return 'out'
+
+        if ntype == 'ocr':
+            self._ensure_window_focus()
+            roi = data.get('roi')
+            if not roi:
+                self.log("⚠️ OCR: 未设置识别区域", "warning")
+                return 'not_found'
+            
+            var_name = data.get('var_name', 'ocr_result')
+            expected_text = data.get('expected_text', '')
+            
+            # 计算绝对坐标
+            if self.context['window_handle'] and self.context['window_rect']:
+                abs_x = roi[0] + win_offset_x
+                abs_y = roi[1] + win_offset_y
+            else:
+                abs_x = roi[0]
+                abs_y = roi[1]
+            
+            self.log(f"📝 OCR识别: ({abs_x},{abs_y}) {roi[2]}x{roi[3]}", "info")
+            
+            if not HAS_OCR:
+                self.log("⚠️ OCR 引擎未安装，请放置 RapidOcrOnnx64.dll", "warning")
+                return 'not_found'
+            
+            try:
+                import io
+                ocr = get_ocr_engine()
+                if not ocr:
+                    self.log("❌ OCR 引擎初始化失败", "error")
+                    return 'not_found'
+                
+                # 截图
+                bbox = (abs_x, abs_y, abs_x + roi[2], abs_y + roi[3])
+                img = VisionEngine.capture_screen(bbox=bbox)
+                if img is None:
+                    self.log("❌ OCR 截图失败", "error")
+                    return 'not_found'
+                
+                # 转为 JPEG 字节流
+                buffer = io.BytesIO()
+                img.convert('RGB').save(buffer, format='JPEG', quality=85)
+                img_data = buffer.getvalue()
+                
+                # OCR 识别
+                text = ocr.detect(img_data, len(img_data))
+                text = text if text else ''
+                
+                # 保存到变量
+                self.runtime_memory[var_name] = text
+                display = text[:50] + '...' if len(text) > 50 else text
+                self.log(f"✅ OCR结果: {display if display else '(空)'}", "success")
+                
+                # 检查期望文本
+                if expected_text:
+                    if expected_text in text:
+                        self.log(f"✅ 匹配到: {expected_text}", "success")
+                        return 'found'
+                    else:
+                        self.log(f"⚠️ 未匹配: {expected_text}", "warning")
+                        return 'not_found'
+                
+                return 'found' if text.strip() else 'not_found'
+            except Exception as e:
+                self.log(f"❌ OCR异常: {e}", "error")
+                return 'not_found'
 
         if ntype == 'var_switch':
             val = str(self.runtime_memory.get(data.get('var_name',''), ''))
