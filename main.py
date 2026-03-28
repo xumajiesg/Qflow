@@ -659,6 +659,9 @@ class LogPanel(tk.Frame):
         self.text_area.config(state='normal')
         self.text_area.insert('end', f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n", level)
         self.text_area.see('end'); self.text_area.config(state='disabled')
+        # 同时更新悬浮日志窗口
+        if hasattr(self.app, 'add_floating_log'):
+            self.app.add_floating_log(msg, level)
         
     def clear(self): 
         self.text_area.config(state='normal'); self.text_area.delete(1.0, 'end'); self.text_area.config(state='disabled')
@@ -713,6 +716,178 @@ class WatchPanel(tk.Frame):
             self.tree.insert('', 'end', values=(k, display_v, type_name))
 
 
+
+
+class FloatingLogWindow:
+    """悬浮日志窗口 - 运行时显示在工作流上方"""
+    
+    _instance = None
+    
+    def __init__(self, parent_app):
+        self.app = parent_app
+        self.window = None
+        self.text_widget = None
+        self.drag_data = {"x": 0, "y": 0, "dragging": False}
+        self.is_visible = False
+        FloatingLogWindow._instance = self
+    
+    @classmethod
+    def get_instance(cls):
+        return cls._instance
+    
+    def create(self):
+        """创建悬浮窗口"""
+        if self.window and self.window.winfo_exists():
+            return
+        
+        # 创建窗口
+        self.window = tk.Toplevel()
+        self.window.title("Qflow 运行时日志")
+        self.window.geometry("400x200")
+        self.window.resizable(True, True)
+        
+        # 无标题栏但可拖动
+        self.window.overrideredirect(True)
+        self.window.attributes("-topmost", True)  # 始终在最前
+        
+        # 半透明背景
+        try:
+            self.window.attributes("-alpha", 0.95)
+        except:
+            pass
+        
+        # 浅色主题
+        bg_color = "#1e1e1e"
+        fg_color = "#d4d4d4"
+        header_bg = "#2d2d2d"
+        border_color = "#64b5f6"
+        
+        # 设置背景色
+        self.window.configure(bg=bg_color)
+        
+        # 拖动区域（标题栏）
+        self.title_bar = tk.Frame(self.window, bg=header_bg, height=28, cursor="fleur")
+        self.title_bar.pack(fill="x")
+        self.title_bar.bind("<ButtonPress-1>", self.on_drag_start)
+        self.title_bar.bind("<B1-Motion>", self.on_drag_motion)
+        self.title_bar.bind("<ButtonRelease-1>", self.on_drag_end)
+        
+        # 标题
+        title_label = tk.Label(self.title_bar, text="📋 Qflow 运行时日志", 
+                               bg=header_bg, fg="white", font=("Microsoft YaHei", 9, "bold"))
+        title_label.pack(side="left", padx=10)
+        
+        # 关闭按钮
+        close_btn = tk.Label(self.title_bar, text="✕", bg=header_bg, fg="#ef5350",
+                            font=("Arial", 10, "bold"), cursor="hand2")
+        close_btn.pack(side="right", padx=8)
+        close_btn.bind("<ButtonPress-1>", lambda e: self.hide())
+        
+        # 最小化按钮
+        min_btn = tk.Label(self.title_bar, text="─", bg=header_bg, fg="white",
+                          font=("Arial", 10), cursor="hand2")
+        min_btn.pack(side="right", padx=2)
+        min_btn.bind("<ButtonPress-1>", lambda e: self.minimize())
+        
+        # 日志文本框
+        text_frame = tk.Frame(self.window, bg=bg_color)
+        text_frame.pack(fill="both", expand=True, padx=2, pady=2)
+        
+        scrollbar = tk.Scrollbar(text_frame)
+        scrollbar.pack(side="right", fill="y")
+        
+        self.text_widget = tk.Text(text_frame, bg=bg_color, fg=fg_color,
+                                   font=("Consolas", 9), wrap="word",
+                                   yscrollcommand=scrollbar.set,
+                                   state="disabled", relief="flat", bd=0)
+        self.text_widget.pack(side="left", fill="both", expand=True)
+        scrollbar.config(command=self.text_widget.yview)
+        
+        # 配置日志颜色标签
+        self.text_widget.tag_config("info", foreground="#64b5f6")
+        self.text_widget.tag_config("success", foreground="#81c784")
+        self.text_widget.tag_config("warning", foreground="#ffd54f")
+        self.text_widget.tag_config("error", foreground="#e57373")
+        self.text_widget.tag_config("exec", foreground="#666666")
+        self.text_widget.tag_config("paused", foreground="#fff176")
+        
+        # 窗口阴影效果（用边框模拟）
+        self.window.configure(highlightbackground=border_color, highlightthickness=1)
+        
+        # 初始位置：右下角
+        screen_w = self.window.winfo_screenwidth()
+        screen_h = self.window.winfo_screenheight()
+        self.window.geometry(f"400x200+{screen_w-420}+{screen_h-280}")
+    
+    def on_drag_start(self, event):
+        self.drag_data["x"] = event.x
+        self.drag_data["y"] = event.y
+        self.drag_data["dragging"] = True
+        self.title_bar.configure(cursor="fleur")
+    
+    def on_drag_motion(self, event):
+        if self.drag_data["dragging"]:
+            dx = event.x - self.drag_data["x"]
+            dy = event.y - self.drag_data["y"]
+            x = self.window.winfo_x() + dx
+            y = self.window.winfo_y() + dy
+            self.window.geometry(f"+{x}+{y}")
+    
+    def on_drag_end(self, event):
+        self.drag_data["dragging"] = False
+        self.title_bar.configure(cursor="fleur")
+    
+    def show(self):
+        """显示窗口"""
+        if not self.window or not self.window.winfo_exists():
+            self.create()
+        self.window.deiconify()
+        self.window.lift()
+        self.is_visible = True
+    
+    def hide(self):
+        """隐藏窗口"""
+        if self.window and self.window.winfo_exists():
+            self.window.withdraw()
+        self.is_visible = False
+    
+    def minimize(self):
+        """最小化窗口"""
+        if self.window and self.window.winfo_exists():
+            self.window.iconify()
+    
+    def add_log(self, message, level="info"):
+        """添加日志"""
+        if not self.window or not self.window.winfo_exists():
+            return
+        
+        try:
+            self.text_widget.config(state="normal")
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            self.text_widget.insert("end", f"[{timestamp}] ", "info")
+            self.text_widget.insert("end", f"{message}\n", level)
+            self.text_widget.see("end")
+            self.text_widget.config(state="disabled")
+        except:
+            pass
+    
+    def clear(self):
+        """清空日志"""
+        if self.text_widget and self.text_widget.winfo_exists():
+            self.text_widget.config(state="normal")
+            self.text_widget.delete(1.0, "end")
+            self.text_widget.config(state="disabled")
+    
+    def destroy(self):
+        """销毁窗口"""
+        if self.window and self.window.winfo_exists():
+            self.window.destroy()
+        self.window = None
+        self.text_widget = None
+        self.is_visible = False
+        FloatingLogWindow._instance = None
+
+
 class AutomationCore:
     def __init__(self, log_callback, app_instance):
         self.running = False; self.paused = False; self.stop_event = threading.Event(); self.pause_event = threading.Event()
@@ -747,12 +922,15 @@ class AutomationCore:
         self.runtime_memory = {}; self.active_threads = 0
         self.context = {'window_rect': None, 'window_handle': 0, 'window_offset': (0, 0)}
         self.performance_stats = {'nodes_executed': 0, 'errors': 0, 'start_time': time.time()}
-        self.log("🚀 引擎启动", "exec"); self.app.iconify()
+        self.log("🚀 引擎启动", "exec")
+        # 显示悬浮日志窗口
+        self.app.after(0, self.app.show_floating_log)
         threading.Thread(target=self._run_flow_engine, args=(start_node_id,), daemon=True).start()
 
     def stop(self):
         if not self.running: return
         self.stop_event.set(); self.pause_event.set(); self.log("🛑 正在停止...", "warning")
+        self.app.after(0, self.app.hide_floating_log)
         self.app.after(0, self.app.reset_ui_state)
 
     def pause(self): 
@@ -777,6 +955,7 @@ class AutomationCore:
                 self.log(f"🔴 命中断点: [{node_title}]", "paused")
                 self.pause()
                 self.app.after(0, self.app.deiconify)
+                self.app.after(0, self.app.show_floating_log)  # 确保悬浮窗口显示
                 self.app.after(100, self.app.refresh_watch_panel)
         if not self.pause_event.is_set(): self.pause_event.wait()
 
@@ -2294,6 +2473,9 @@ class App(tk.Tk):
         
         self.log_panel = LogPanel(self.main_paned)
         self.main_paned.add(self.log_panel, minsize=80, height=130)
+        
+        # 悬浮日志窗口
+        self.floating_log = FloatingLogWindow(self)
         self.watch_panel = WatchPanel(self.main_paned)
         self.main_paned.add(self.watch_panel, minsize=60, height=120)
         self.watch_panel.core_ref = self.core 
@@ -2492,6 +2674,21 @@ class App(tk.Tk):
     def _on_step(self):
         if self.core.paused:
             self.core.step()
+    def show_floating_log(self):
+        """显示悬浮日志窗口"""
+        if hasattr(self, 'floating_log'):
+            self.floating_log.show()
+    
+    def hide_floating_log(self):
+        """隐藏悬浮日志窗口"""
+        if hasattr(self, 'floating_log'):
+            self.floating_log.hide()
+    
+    def add_floating_log(self, message, level="info"):
+        """添加悬浮日志"""
+        if hasattr(self, 'floating_log') and self.floating_log.is_visible:
+            self.floating_log.add_log(message, level)
+    
     def reset_ui_state(self): self.core.running=False; self.btn_run.config(text="▶ 启动", bg=COLORS['success']); self.btn_pause.config(text="⏸ 暂停", bg=COLORS['warning'], state='disabled'); [self.highlight_node_safe(n, None) for n in self.editor.nodes]
     def log(self,msg, level='info'): self.log_q.put((msg, level))
     def _poll_log(self):
