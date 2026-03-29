@@ -655,10 +655,14 @@ class LogPanel(tk.Frame):
         self.text_frame.pack(fill='both', expand=True)
 
     def add_log(self, msg, level='info'):
-        if not self.winfo_exists(): return
-        self.text_area.config(state='normal')
-        self.text_area.insert('end', f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n", level)
-        self.text_area.see('end'); self.text_area.config(state='disabled')
+        # 即使主窗口最小化也要记录日志（供悬浮窗口显示）
+        try:
+            if self.winfo_exists():
+                self.text_area.config(state='normal')
+                self.text_area.insert('end', f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n", level)
+                self.text_area.see('end'); self.text_area.config(state='disabled')
+        except:
+            pass
         # 同时更新悬浮日志窗口
         if hasattr(self.app, 'add_floating_log'):
             self.app.add_floating_log(msg, level)
@@ -923,14 +927,17 @@ class AutomationCore:
         self.context = {'window_rect': None, 'window_handle': 0, 'window_offset': (0, 0)}
         self.performance_stats = {'nodes_executed': 0, 'errors': 0, 'start_time': time.time()}
         self.log("🚀 引擎启动", "exec")
-        # 显示悬浮日志窗口
+        # 显示悬浮日志窗口并最小化主窗口
         self.app.after(0, self.app.show_floating_log)
+        self.app.after(200, self.app.iconify)  # 最小化主窗口
+        self.app.after(100, self.app.iconify)  # 最小化主窗口，避免干扰截图
         threading.Thread(target=self._run_flow_engine, args=(start_node_id,), daemon=True).start()
 
     def stop(self):
         if not self.running: return
         self.stop_event.set(); self.pause_event.set(); self.log("🛑 正在停止...", "warning")
         self.app.after(0, self.app.hide_floating_log)
+        self.app.after(100, self.app.deiconify)  # 恢复主窗口
         self.app.after(0, self.app.reset_ui_state)
 
     def pause(self): 
@@ -2678,6 +2685,8 @@ class App(tk.Tk):
         """显示悬浮日志窗口"""
         if hasattr(self, 'floating_log'):
             self.floating_log.show()
+            # 清空之前的日志
+            self.floating_log.clear()
     
     def hide_floating_log(self):
         """隐藏悬浮日志窗口"""
@@ -2685,7 +2694,7 @@ class App(tk.Tk):
             self.floating_log.hide()
     
     def add_floating_log(self, message, level="info"):
-        """添加悬浮日志"""
+        """添加日志到悬浮窗口"""
         if hasattr(self, 'floating_log') and self.floating_log.is_visible:
             self.floating_log.add_log(message, level)
     
