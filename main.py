@@ -637,8 +637,9 @@ class VisionEngine:
 
 # --- 4. 日志与核心 ---
 class LogPanel(tk.Frame):
-    def __init__(self, parent, **kwargs):
+    def __init__(self, parent, app=None, **kwargs):
         super().__init__(parent, bg=COLORS['bg_panel'], **kwargs)
+        self.app = app  # 保存 app 引用
         self.toolbar = tk.Frame(self, bg=COLORS['bg_header'], height=28)
         self.toolbar.pack_propagate(False); self.toolbar.pack(fill='x')
         tk.Label(self.toolbar, text="📋 执行日志", bg=COLORS['bg_header'], fg='white', font=FONTS['node_title']).pack(side='left', padx=10)
@@ -929,8 +930,7 @@ class AutomationCore:
         self.log("🚀 引擎启动", "exec")
         # 显示悬浮日志窗口并最小化主窗口
         self.app.after(0, self.app.show_floating_log)
-        self.app.after(200, self.app.iconify)  # 最小化主窗口
-        self.app.after(100, self.app.iconify)  # 最小化主窗口，避免干扰截图
+        self.app.after(200, self.app.iconify)  # 最小化主窗口，避免干扰截图
         threading.Thread(target=self._run_flow_engine, args=(start_node_id,), daemon=True).start()
 
     def stop(self):
@@ -2478,7 +2478,7 @@ class App(tk.Tk):
         self.editor = FlowEditor(h_paned, self); h_paned.add(self.editor, minsize=400, stretch="always")
         self.property_panel = PropertyPanel(h_paned, self); h_paned.add(self.property_panel, minsize=280, width=180)
         
-        self.log_panel = LogPanel(self.main_paned)
+        self.log_panel = LogPanel(self.main_paned, app=self)
         self.main_paned.add(self.log_panel, minsize=80, height=130)
         
         # 悬浮日志窗口
