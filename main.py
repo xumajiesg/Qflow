@@ -544,7 +544,8 @@ class VisionEngine:
         except OSError: return None
 
     @staticmethod
-    def locate(needle, confidence=0.8, timeout=0, stop_event=None, grayscale=True, multiscale=True, scaling_ratio=1.0, strategy='hybrid', region=None):
+    def locate(needle, confidence=0.8, timeout=0, stop_event=None, grayscale=True, multiscale=True, scaling_ratio=None, strategy='hybrid', region=None):
+        if scaling_ratio is None: scaling_ratio = SCALE_FACTOR  # 使用实际 DPI 缩放比
         start_time = time.time()
         while True:
             if stop_event and stop_event.is_set(): return None
@@ -1303,7 +1304,7 @@ class AutomationCore:
                 primary_res = None
                 for i, anchor in enumerate(anchors):
                     if self.stop_event.is_set(): return '__STOP__'
-                    res = VisionEngine.locate(anchor['image'], confidence=conf, timeout=(timeout_val if i==0 else 2.0), stop_event=self.stop_event, strategy=data.get('match_strategy','hybrid'), region=search_region)
+                    res = VisionEngine.locate(anchor['image'], confidence=conf, timeout=(timeout_val if i==0 else 2.0), stop_event=self.stop_event, strategy=data.get('match_strategy','hybrid'), scaling_ratio=SCALE_FACTOR, region=search_region)
                     if not res: return 'timeout'
                     if i == 0: primary_res = res
                 if primary_res:
@@ -1316,7 +1317,7 @@ class AutomationCore:
             while True:
                 if self.stop_event.is_set(): return '__STOP__'
                 self._check_pause()
-                res = VisionEngine.locate(data.get('image'), confidence=conf, timeout=0, stop_event=self.stop_event, region=search_region, strategy=data.get('match_strategy','hybrid'))
+                res = VisionEngine.locate(data.get('image'), confidence=conf, timeout=0, stop_event=self.stop_event, region=search_region, strategy=data.get('match_strategy','hybrid'), scaling_ratio=SCALE_FACTOR)
                 if res:
                     with self.io_lock:
                         if (act := data.get('click_type', 'click')) != 'none':
@@ -1415,7 +1416,7 @@ class AutomationCore:
         
             hay = VisionEngine.capture_screen(bbox=capture_bbox)
             for img in imgs:
-                if not VisionEngine._advanced_match(img.get('image'), hay, safe_float(data.get('confidence',0.9)), self.stop_event, True, True, self.scaling_ratio, 'hybrid')[0]: return 'no'
+                if not VisionEngine._advanced_match(img.get('image'), hay, safe_float(data.get('confidence',0.9)), self.stop_event, True, True, SCALE_FACTOR, 'hybrid')[0]: return 'no'
             return 'yes'
         return 'out'
 
@@ -2292,7 +2293,7 @@ class PropertyPanel(tk.Frame):
             if self.current_node.type == 'if_img':
                 imgs = self.current_node.data.get('images', []); passed = True; screen = VisionEngine.capture_screen()
                 for img in imgs:
-                    if not VisionEngine._advanced_match(img.get('image'), screen, 0.8, None, True, True, 1.0, 'hybrid')[0]: passed = False; break
+                    if not VisionEngine._advanced_match(img.get('image'), screen, 0.8, None, True, True, SCALE_FACTOR, 'hybrid')[0]: passed = False; break
                 res_txt = "✅ 全部满足" if passed else "❌ 条件不满足"
             else:
                  strategy = self.current_node.data.get('match_strategy', 'hybrid')
