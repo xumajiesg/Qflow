@@ -554,7 +554,8 @@ class VisionEngine:
             haystack = VisionEngine.capture_screen(bbox=capture_bbox)
             
             if haystack is None:
-                time.sleep(0.5) 
+                time.sleep(0.5)
+                # 截图连续失败可能意味着系统资源紧张
                 if timeout <= 0 or (time.time()-start_time >= timeout): break
                 continue
             
@@ -575,6 +576,7 @@ class VisionEngine:
         if not needle or not haystack: return None, 0.0
         if needle.width > haystack.width or needle.height > haystack.height: return None, 0.0
         if HAS_OPENCV:
+            nA = hA = None
             try:
                 if grayscale: 
                     nA = cv2.cvtColor(np.array(needle), cv2.COLOR_RGB2GRAY)
@@ -584,21 +586,27 @@ class VisionEngine:
                     hA = cv2.cvtColor(np.array(haystack), cv2.COLOR_RGB2BGR)
                 
                 if strategy == 'feature': 
-                    return VisionEngine._feature_match_akaze(nA, hA)
+                    result = VisionEngine._feature_match_akaze(nA, hA)
+                    del nA, hA; return result
                 
                 nH, nW = nA.shape[:2]; hH, hW = hA.shape[:2]; scales = [1.0]
                 if multiscale: scales = np.unique(np.append(np.linspace(scaling_ratio * 0.8, scaling_ratio * 1.2, 10), [1.0, scaling_ratio]))
                 best_max, best_rect = -1, None
                 for s in scales:
-                    if stop_event and stop_event.is_set(): return None, 0.0
+                    if stop_event and stop_event.is_set(): break
                     tW, tH = int(nW * s), int(nH * s)
                     if tW < 5 or tH < 5 or tW > hW or tH > hH: continue
                     res = cv2.matchTemplate(hA, cv2.resize(nA, (tW, tH), interpolation=cv2.INTER_AREA), cv2.TM_CCOEFF_NORMED)
+                    del res  # 及时释放 matchTemplate 结果
                     _, max_val, _, max_loc = cv2.minMaxLoc(res)
                     if max_val > best_max: best_max, best_rect = max_val, Box(max_loc[0], max_loc[1], tW, tH)
                     if best_max > 0.99: break
+                del hA, nA  # 及时释放大数组
                 if best_rect and best_max >= confidence: return best_rect, best_max
-            except Exception: pass
+            except Exception as e:
+                if nA is not None: del nA
+                if hA is not None: del hA
+                pass
         try:
             res = pyautogui.locate(needle, haystack, confidence=confidence, grayscale=grayscale)
             if res: return Box(res.left, res.top, res.width, res.height), 1.0
@@ -992,7 +1000,8 @@ class AutomationCore:
             for start_id in start_nodes: self._fork_node(start_id)
             while not self.stop_event.is_set():
                 with self.thread_lock: 
-                    if self.active_threads <= 0: break
+                    active = self.active_threads
+                if active <= 0: break
                 time.sleep(0.5)
         except Exception as e: traceback.print_exc(); self.log(f"引擎异常: {str(e)}", "error")
         finally:
@@ -1008,7 +1017,14 @@ class AutomationCore:
     def _fork_node(self, node_id):
         with self.thread_lock:
             if node_id not in self.project['nodes']: return
-            if self.active_threads >= self.max_threads: return
+            # 安全检查：如果 running=False 说明引擎已停，不应再 fork
+            if not self.running: return
+            if self.active_threads >= self.max_threads:
+                # 活跃线程数异常高，强制重置（防止卡死）
+                if self.active_threads > self.max_threads:
+                    self.active_threads = 0
+                else:
+                    return
             self.active_threads += 1
         threading.Thread(target=self._process_node_thread, args=(node_id,), daemon=True).start()
 
