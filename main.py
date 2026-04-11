@@ -605,10 +605,9 @@ class VisionEngine:
 
     @staticmethod
     def _advanced_match(needle, haystack, confidence, stop_event, grayscale, multiscale, scaling_ratio=1.0, strategy='hybrid'):
-        # scaling_ratio 默认为 1.0：模板与屏幕截图均为逻辑像素，搜索固定范围 [0.5, 1.5]
+        # scaling_ratio 默认为 1.0：模板与屏幕截图均为逻辑像素，搜索固定范围 [0.3, 2.5]
         # 移除了对 SCALE_FACTOR 的依赖，分辨率/DPI 变化不影响找图结果
         if not needle or not haystack: return None, 0.0
-        print(f"[DEBUG locate] needle={needle.size} haystack={haystack.size} scaling_ratio={scaling_ratio}")
         if needle.width > haystack.width or needle.height > haystack.height: return None, 0.0
         if HAS_OPENCV:
             nA = hA = None
@@ -625,7 +624,7 @@ class VisionEngine:
                     del nA, hA; return result
                 
                 nH, nW = nA.shape[:2]; hH, hW = hA.shape[:2]; scales = [1.0]
-                if multiscale: scales = np.unique(np.append(np.linspace(scaling_ratio * 0.8, scaling_ratio * 1.2, 10), [1.0, scaling_ratio]))
+                if multiscale: scales = np.unique(np.append(np.linspace(0.3, 2.5, 15), [1.0, scaling_ratio]))
                 best_max, best_rect = -1, None
                 for s in scales:
                     if stop_event and stop_event.is_set(): break
@@ -637,7 +636,6 @@ class VisionEngine:
                     if max_val > best_max: best_max, best_rect = max_val, Box(max_loc[0], max_loc[1], tW, tH)
                     if best_max > 0.99: break
                 del hA, nA  # 及时释放大数组
-                print(f"[DEBUG locate] best_score={best_max:.4f} threshold={confidence} found={best_rect is not None} scales_used={scales}")
                 if best_rect and best_max >= confidence: return best_rect, best_max
             except Exception as e:
                 if nA is not None: del nA
