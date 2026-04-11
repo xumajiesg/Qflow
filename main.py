@@ -40,6 +40,14 @@ except ImportError:
     HAS_OPENCV = False
     print("⚠️ 警告: 未安装 opencv-python，高级图像识别功能受限。")
 
+# mss — 用于 DPI 无感知屏幕截图（分辨率变化时找图不失效的关键）
+try:
+    import mss
+    HAS_MSS = True
+except ImportError:
+    HAS_MSS = False
+    print("⚠️ 提示: 未安装 mss，将使用 PIL ImageGrab（存在 DPI 缩放兼容性问题）。")
+
 try:
     from comtypes import CLSCTX_ALL
     from pycaw.pycaw import AudioUtilities, IAudioMeterInformation
@@ -540,12 +548,36 @@ class AudioEngine:
 class VisionEngine:
     @staticmethod
     def capture_screen(bbox=None):
-        try: return ImageGrab.grab(bbox=bbox, all_screens=True)
-        except OSError: return None
+        """使用 mss 截图，始终返回逻辑像素（去除 DPI 缩放），分辨率变化时找图不受影响。"""
+        if HAS_MSS:
+            try:
+                with mss.mss() as s:
+                    # 获取虚拟屏幕范围（所有屏幕合并的逻辑坐标）
+                    mon = s.monitors[0]  # monitor 0 = 虚拟屏幕（所有屏幕合并）
+                    if bbox:
+                        # bbox: (x1, y1, x2, y2) 逻辑坐标，直接传给 mss
+                        x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+                        w, h = x2 - x1, y2 - y1
+                        if w <= 0 or h <= 0:
+                            return None
+                        # mss 需要 {"left": x, "top": y, "width": w, "height": h}
+                        shot = s.grab({"left": x1, "top": y1, "width": w, "height": h})
+                    else:
+                        shot = s.grab(mon)
+                    # mss 返回 BGRA，转为 PIL Image（去掉 Alpha 通道）
+                    return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+            except Exception:
+                pass
+        # 降级：使用 ImageGrab（注意：受 DPI 缩放影响，可能导致分辨率变化后找图失败）
+        try:
+            return ImageGrab.grab(bbox=bbox, all_screens=True)
+        except OSError:
+            return None
 
     @staticmethod
-    def locate(needle, confidence=0.8, timeout=0, stop_event=None, grayscale=True, multiscale=True, scaling_ratio=None, strategy='hybrid', region=None):
-        if scaling_ratio is None: scaling_ratio = SCALE_FACTOR  # 使用实际 DPI 缩放比
+    def locate(needle, confidence=0.8, timeout=0, stop_event=None, grayscale=True, multiscale=True, strategy='hybrid', region=None):
+        # 多尺度搜索范围固定为 [0.5, 1.5]（由 _advanced_match 内部硬编码），
+        # 与当前 DPI/分辨率完全无关。模板和屏幕截图均基于逻辑像素。
         start_time = time.time()
         while True:
             if stop_event and stop_event.is_set(): return None
@@ -560,7 +592,7 @@ class VisionEngine:
                 continue
             
             try:
-                result, _ = VisionEngine._advanced_match(needle, haystack, confidence, stop_event, grayscale, multiscale, scaling_ratio, strategy)
+                result, _ = VisionEngine._advanced_match(needle, haystack, confidence, stop_event, grayscale, multiscale, 1.0, strategy)
                 if result:
                     offset_x = region[0] if region else 0
                     offset_y = region[1] if region else 0
@@ -572,7 +604,9 @@ class VisionEngine:
         return None
 
     @staticmethod
-    def _advanced_match(needle, haystack, confidence, stop_event, grayscale, multiscale, scaling_ratio, strategy):
+    def _advanced_match(needle, haystack, confidence, stop_event, grayscale, multiscale, scaling_ratio=1.0, strategy='hybrid'):
+        # scaling_ratio 默认为 1.0：模板与屏幕截图均为逻辑像素，搜索固定范围 [0.5, 1.5]
+        # 移除了对 SCALE_FACTOR 的依赖，分辨率/DPI 变化不影响找图结果
         if not needle or not haystack: return None, 0.0
         if needle.width > haystack.width or needle.height > haystack.height: return None, 0.0
         if HAS_OPENCV:
@@ -1320,7 +1354,7 @@ class AutomationCore:
                 primary_res = None
                 for i, anchor in enumerate(anchors):
                     if self.stop_event.is_set(): return '__STOP__'
-                    res = VisionEngine.locate(anchor['image'], confidence=conf, timeout=(timeout_val if i==0 else 2.0), stop_event=self.stop_event, strategy=data.get('match_strategy','hybrid'), scaling_ratio=SCALE_FACTOR, region=search_region)
+                    res = VisionEngine.locate(anchor['image'], confidence=conf, timeout=(timeout_val if i==0 else 2.0), stop_event=self.stop_event, strategy=data.get('match_strategy','hybrid'), region=search_region)
                     if not res: return 'timeout'
                     if i == 0: primary_res = res
                 if primary_res:
@@ -1333,7 +1367,7 @@ class AutomationCore:
             while True:
                 if self.stop_event.is_set(): return '__STOP__'
                 self._check_pause()
-                res = VisionEngine.locate(data.get('image'), confidence=conf, timeout=0, stop_event=self.stop_event, region=search_region, strategy=data.get('match_strategy','hybrid'), scaling_ratio=SCALE_FACTOR)
+                res = VisionEngine.locate(data.get('image'), confidence=conf, timeout=0, stop_event=self.stop_event, region=search_region, strategy=data.get('match_strategy','hybrid'))
                 if res:
                     with self.io_lock:
                         if (act := data.get('click_type', 'click')) != 'none':
@@ -1432,7 +1466,7 @@ class AutomationCore:
         
             hay = VisionEngine.capture_screen(bbox=capture_bbox)
             for img in imgs:
-                if not VisionEngine._advanced_match(img.get('image'), hay, safe_float(data.get('confidence',0.9)), self.stop_event, True, True, SCALE_FACTOR, 'hybrid')[0]: return 'no'
+                if not VisionEngine._advanced_match(img.get('image'), hay, safe_float(data.get('confidence',0.9)), self.stop_event, True, True, 1.0, 'hybrid')[0]: return 'no'
             return 'yes'
         return 'out'
 
@@ -2309,7 +2343,7 @@ class PropertyPanel(tk.Frame):
             if self.current_node.type == 'if_img':
                 imgs = self.current_node.data.get('images', []); passed = True; screen = VisionEngine.capture_screen()
                 for img in imgs:
-                    if not VisionEngine._advanced_match(img.get('image'), screen, 0.8, None, True, True, SCALE_FACTOR, 'hybrid')[0]: passed = False; break
+                    if not VisionEngine._advanced_match(img.get('image'), screen, 0.8, None, True, True, 1.0, 'hybrid')[0]: passed = False; break
                 res_txt = "✅ 全部满足" if passed else "❌ 条件不满足"
             else:
                  strategy = self.current_node.data.get('match_strategy', 'hybrid')
