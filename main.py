@@ -592,7 +592,19 @@ class VisionEngine:
                 continue
             
             try:
-                result, _ = VisionEngine._advanced_match(needle, haystack, confidence, stop_event, grayscale, multiscale, 1.0, strategy)
+                # 调试截图保存
+                import os, base64, io
+                dbg_dir = os.path.join(os.path.dirname(__file__), "debug_shots")
+                os.makedirs(dbg_dir, exist_ok=True)
+                haystack_debug = haystack.copy()
+                haystack_debug.save(os.path.join(dbg_dir, "haystack.png"))
+                if needle and hasattr(needle, 'save'):
+                    needle.save(os.path.join(dbg_dir, "needle.png"))
+                
+                print(f"[DEBUG locate] needle={type(needle).__name__} size={getattr(needle,'size',None)} haystack={haystack.size if haystack else None}")
+                print(f"[DEBUG locate] screenshots saved to: {dbg_dir}")
+                result, score = VisionEngine._advanced_match(needle, haystack, confidence, stop_event, grayscale, multiscale, 1.0, strategy)
+                print(f"[DEBUG locate] _advanced_match result={result} score={score:.4f}")
                 if result:
                     offset_x = region[0] if region else 0
                     offset_y = region[1] if region else 0
@@ -1351,10 +1363,14 @@ class AutomationCore:
             conf, timeout_val = safe_float(data.get('confidence', 0.9)), max(0.5, safe_float(data.get('timeout', 10.0)))
             search_region = win_region if win_region else None
             if (anchors := data.get('anchors', [])):
+                print(f"[DEBUG image_node] anchors={len(anchors)}, anchor[0].keys={list(anchors[0].keys()) if anchors else 'empty'}")
+                print(f"[DEBUG image_node] anchor[0]['image']={anchors[0].get('image') if anchors else 'N/A'}")
                 primary_res = None
                 for i, anchor in enumerate(anchors):
                     if self.stop_event.is_set(): return '__STOP__'
-                    res = VisionEngine.locate(anchor['image'], confidence=conf, timeout=(timeout_val if i==0 else 2.0), stop_event=self.stop_event, strategy=data.get('match_strategy','hybrid'), region=search_region)
+                    anchor_img = anchor.get('image')
+                    print(f"[DEBUG image_node] locate #{i}: anchor['image']={type(anchor_img).__name__} size={getattr(anchor_img,'size',None)}")
+                    res = VisionEngine.locate(anchor_img, confidence=conf, timeout=(timeout_val if i==0 else 2.0), stop_event=self.stop_event, strategy=data.get('match_strategy','hybrid'), region=search_region)
                     if not res: return 'timeout'
                     if i == 0: primary_res = res
                 if primary_res:
@@ -2343,7 +2359,14 @@ class PropertyPanel(tk.Frame):
             if self.current_node.type == 'if_img':
                 imgs = self.current_node.data.get('images', []); passed = True; screen = VisionEngine.capture_screen()
                 for img in imgs:
-                    if not VisionEngine._advanced_match(img.get('image'), screen, 0.8, None, True, True, 1.0, 'hybrid')[0]: passed = False; break
+                    needle_test = img.get('image')
+                    print(f"[DEBUG test_match] img.get('image')={type(needle_test).__name__} size={getattr(needle_test,'size',None)}")
+                    if needle_test is None:
+                        print(f"[DEBUG test_match] needle is None! img.keys={list(img.keys())}")
+                        passed = False; break
+                    r, s = VisionEngine._advanced_match(needle_test, screen, 0.8, None, True, True, 1.0, 'hybrid')
+                    print(f"[DEBUG test_match] _advanced_match result={r} score={s}")
+                    if not r: passed = False; break
                 res_txt = "✅ 全部满足" if passed else "❌ 条件不满足"
             else:
                  strategy = self.current_node.data.get('match_strategy', 'hybrid')
