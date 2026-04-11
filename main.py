@@ -548,29 +548,11 @@ class AudioEngine:
 class VisionEngine:
     @staticmethod
     def capture_screen(bbox=None):
-        """使用 mss 截图，始终返回逻辑像素（去除 DPI 缩放），分辨率变化时找图不受影响。"""
-        if HAS_MSS:
-            try:
-                with mss.mss() as s:
-                    # 获取虚拟屏幕范围（所有屏幕合并的逻辑坐标）
-                    mon = s.monitors[0]  # monitor 0 = 虚拟屏幕（所有屏幕合并）
-                    if bbox:
-                        # bbox: (x1, y1, x2, y2) 逻辑坐标，直接传给 mss
-                        x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
-                        w, h = x2 - x1, y2 - y1
-                        if w <= 0 or h <= 0:
-                            return None
-                        # mss 需要 {"left": x, "top": y, "width": w, "height": h}
-                        shot = s.grab({"left": x1, "top": y1, "width": w, "height": h})
-                    else:
-                        shot = s.grab(mon)
-                    # mss 返回 BGRA，转为 PIL Image（去掉 Alpha 通道）
-                    return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
-            except Exception:
-                pass
-        # 降级：使用 ImageGrab（注意：受 DPI 缩放影响，可能导致分辨率变化后找图失败）
+        """使用 PIL ImageGrab 截图，保持与旧截图一致的截图方式。"""
         try:
-            return ImageGrab.grab(bbox=bbox, all_screens=True)
+            if bbox:
+                return ImageGrab.grab(bbox=bbox, all_screens=True)
+            return ImageGrab.grab(all_screens=True)
         except OSError:
             return None
 
@@ -592,19 +574,7 @@ class VisionEngine:
                 continue
             
             try:
-                # 调试截图保存
-                import os, base64, io
-                dbg_dir = os.path.join(os.path.dirname(__file__), "debug_shots")
-                os.makedirs(dbg_dir, exist_ok=True)
-                haystack_debug = haystack.copy()
-                haystack_debug.save(os.path.join(dbg_dir, "haystack.png"))
-                if needle and hasattr(needle, 'save'):
-                    needle.save(os.path.join(dbg_dir, "needle.png"))
-                
-                print(f"[DEBUG locate] needle={type(needle).__name__} size={getattr(needle,'size',None)} haystack={haystack.size if haystack else None}")
-                print(f"[DEBUG locate] screenshots saved to: {dbg_dir}")
                 result, score = VisionEngine._advanced_match(needle, haystack, confidence, stop_event, grayscale, multiscale, 1.0, strategy)
-                print(f"[DEBUG locate] _advanced_match result={result} score={score:.4f}")
                 if result:
                     offset_x = region[0] if region else 0
                     offset_y = region[1] if region else 0
@@ -1363,14 +1333,10 @@ class AutomationCore:
             conf, timeout_val = safe_float(data.get('confidence', 0.9)), max(0.5, safe_float(data.get('timeout', 10.0)))
             search_region = win_region if win_region else None
             if (anchors := data.get('anchors', [])):
-                print(f"[DEBUG image_node] anchors={len(anchors)}, anchor[0].keys={list(anchors[0].keys()) if anchors else 'empty'}")
-                print(f"[DEBUG image_node] anchor[0]['image']={anchors[0].get('image') if anchors else 'N/A'}")
                 primary_res = None
                 for i, anchor in enumerate(anchors):
                     if self.stop_event.is_set(): return '__STOP__'
-                    anchor_img = anchor.get('image')
-                    print(f"[DEBUG image_node] locate #{i}: anchor['image']={type(anchor_img).__name__} size={getattr(anchor_img,'size',None)}")
-                    res = VisionEngine.locate(anchor_img, confidence=conf, timeout=(timeout_val if i==0 else 2.0), stop_event=self.stop_event, strategy=data.get('match_strategy','hybrid'), region=search_region)
+                    res = VisionEngine.locate(anchor['image'], confidence=conf, timeout=(timeout_val if i==0 else 2.0), stop_event=self.stop_event, strategy=data.get('match_strategy','hybrid'), region=search_region)
                     if not res: return 'timeout'
                     if i == 0: primary_res = res
                 if primary_res:
@@ -2359,14 +2325,7 @@ class PropertyPanel(tk.Frame):
             if self.current_node.type == 'if_img':
                 imgs = self.current_node.data.get('images', []); passed = True; screen = VisionEngine.capture_screen()
                 for img in imgs:
-                    needle_test = img.get('image')
-                    print(f"[DEBUG test_match] img.get('image')={type(needle_test).__name__} size={getattr(needle_test,'size',None)}")
-                    if needle_test is None:
-                        print(f"[DEBUG test_match] needle is None! img.keys={list(img.keys())}")
-                        passed = False; break
-                    r, s = VisionEngine._advanced_match(needle_test, screen, 0.8, None, True, True, 1.0, 'hybrid')
-                    print(f"[DEBUG test_match] _advanced_match result={r} score={s}")
-                    if not r: passed = False; break
+                    if not VisionEngine._advanced_match(img.get('image'), screen, 0.8, None, True, True, 1.0, 'hybrid')[0]: passed = False; break
                 res_txt = "✅ 全部满足" if passed else "❌ 条件不满足"
             else:
                  strategy = self.current_node.data.get('match_strategy', 'hybrid')
